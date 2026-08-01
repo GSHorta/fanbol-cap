@@ -465,11 +465,17 @@ function normalizeName(s) {
     .trim();
 }
 
+// normalizedName -> array of same-name candidates, used to disambiguate
+// players who share a name (e.g. two NFL "Byron Murphy"s) by position.
+let sleeperByNamePos = {};
+
 async function loadSleeperIndex() {
   try {
-    const cached = await kvGet('fanbol-sleeper-idx-v3', true);
+    const cached = await kvGet('fanbol-sleeper-idx-v4', true);
     if (cached && cached.value) {
-      sleeperIndex = JSON.parse(cached.value);
+      const parsed = JSON.parse(cached.value);
+      sleeperIndex = parsed.idx;
+      sleeperByNamePos = parsed.byNamePos;
       sleeperReady = true;
       return;
     }
@@ -479,16 +485,20 @@ async function loadSleeperIndex() {
     if (!res.ok) throw new Error('bad status ' + res.status);
     const data = await res.json();
     const idx = {};
+    const byNamePos = {};
     for (const pid in data) {
       const p = data[pid];
       if (!p || (!p.first_name && !p.last_name)) continue;
       const full = `${p.first_name || ''} ${p.last_name || ''}`.trim();
       const norm = normalizeName(full);
-      if (norm && !idx[norm]) idx[norm] = { id: pid, espn_id: p.espn_id || null };
+      if (!norm) continue;
+      if (!idx[norm]) idx[norm] = { id: pid, espn_id: p.espn_id || null };
+      (byNamePos[norm] = byNamePos[norm] || []).push({ id: pid, positions: p.fantasy_positions || (p.position ? [p.position] : []) });
     }
     sleeperIndex = idx;
+    sleeperByNamePos = byNamePos;
     sleeperReady = true;
-    try { await kvSet('fanbol-sleeper-idx-v3', JSON.stringify(idx), true); } catch (e) {}
+    try { await kvSet('fanbol-sleeper-idx-v4', JSON.stringify({ idx, byNamePos }), true); } catch (e) {}
   } catch (e) {
     console.warn('Sleeper player index unavailable, using fallback avatars', e);
   }
@@ -496,6 +506,19 @@ async function loadSleeperIndex() {
 
 function sleeperIdFor(name) {
   return sleeperIndex[normalizeName(name)] || null;
+}
+
+// Same-name collisions (e.g. two NFL players called "Byron Murphy") must not
+// silently pick one at random — only resolve when unambiguous, or when the
+// position field breaks the tie; otherwise skip that player for sync.
+function sleeperMatchFor(p) {
+  const list = sleeperByNamePos[normalizeName(p.name)] || [];
+  if (list.length === 1) return list[0];
+  if (list.length > 1) {
+    const byPos = list.filter(c => c.positions.includes(p.pos));
+    if (byPos.length === 1) return byPos[0];
+  }
+  return null;
 }
 
 // ---------------- Sleeper league sync (auto-detect trades) ----------------
@@ -548,7 +571,7 @@ async function syncSleeperLeague() {
 
     const changes = [];
     players.forEach(p => {
-      const rec = sleeperIdFor(p.name);
+      const rec = sleeperMatchFor(p);
       if (!rec || !rec.id) return;
       const newSigla = pidToSigla[rec.id];
       if (newSigla && newSigla !== p.team) {
