@@ -88,6 +88,15 @@
   .nav-tab.active{background:var(--brand); color:#fff;}
   .nav-tab:hover:not(.active){color:var(--text);}
 
+  .sleeper-sync{
+    display:flex; align-items:center; gap:6px;
+    background:var(--panel); border:1px solid var(--line); border-radius:8px;
+    padding:6px 10px; font-family:var(--mono); font-size:11px; color:var(--muted-2);
+    cursor:pointer; user-select:none; white-space:nowrap;
+  }
+  .sleeper-sync:hover{color:var(--text); border-color:var(--brand);}
+  .sleeper-sync.syncing{color:var(--brand);}
+
   .wrap{max-width:1240px; margin:0 auto; padding:28px 24px;}
 
   /* ---------- League overview scoreboard ---------- */
@@ -339,6 +348,7 @@
         <button class="nav-tab active" data-view="league">Liga</button>
         <button class="nav-tab" data-view="trade">Trade</button>
       </div>
+      <div class="sleeper-sync" id="sleeperSyncBadge" title="Sincroniza os times automaticamente com a liga no Sleeper (detecta trades feitas por lá)">🔄 Sleeper</div>
     </div>
   </div>
 </div>
@@ -383,6 +393,11 @@
 const SEED = JSON.parse(document.getElementById('data-blob').textContent);
 const TEAMS_META = SEED.teams; // static: sigla, franquia, gm, years, salary_cap, piso_salarial, conf_div
 const TEAM_ORDER = Object.keys(TEAMS_META);
+
+// Liga oficial no Sleeper (https://sleeper.com/i/j78mD8XEok9Kw) — usada para
+// detectar automaticamente trades feitas por lá e manter o "team" de cada
+// jogador em dia sem precisar registrar tudo de novo aqui.
+const SLEEPER_LEAGUE_ID = '1200153826695323648';
 
 // ---------------- storage adapter ----------------
 // Runs unchanged in two environments:
@@ -481,6 +496,86 @@ async function loadSleeperIndex() {
 
 function sleeperIdFor(name) {
   return sleeperIndex[normalizeName(name)] || null;
+}
+
+// ---------------- Sleeper league sync (auto-detect trades) ----------------
+let sleeperLeagueSyncedAt = null;
+let sleeperLeagueSyncing = false;
+
+// Sleeper team_name comes with free-form suffixes ("Buffalo Bills - 8F"),
+// so match by prefix against the canonical franchise name instead of exact equality.
+function franchiseSiglaForTeamName(teamName) {
+  const norm = (teamName || '').toUpperCase().replace(/\s+/g, ' ').trim();
+  if (!norm) return null;
+  for (const sigla of TEAM_ORDER) {
+    const franquia = TEAMS_META[sigla].franquia;
+    if (franquia && norm.startsWith(franquia)) return sigla;
+  }
+  return null;
+}
+
+function setSyncBadge(text, cls) {
+  const badge = document.getElementById('sleeperSyncBadge');
+  if (!badge) return;
+  badge.textContent = text;
+  badge.classList.toggle('syncing', !!cls);
+}
+
+async function syncSleeperLeague() {
+  if (sleeperLeagueSyncing) return;
+  sleeperLeagueSyncing = true;
+  setSyncBadge('🔄 Sincronizando…', true);
+  try {
+    if (!sleeperReady) await loadSleeperIndex();
+
+    const [usersRes, rostersRes] = await Promise.all([
+      fetch(`https://api.sleeper.app/v1/league/${SLEEPER_LEAGUE_ID}/users`),
+      fetch(`https://api.sleeper.app/v1/league/${SLEEPER_LEAGUE_ID}/rosters`)
+    ]);
+    if (!usersRes.ok || !rostersRes.ok) throw new Error('bad status');
+    const users = await usersRes.json();
+    const rosters = await rostersRes.json();
+
+    const teamNameByOwner = {};
+    users.forEach(u => { teamNameByOwner[u.user_id] = (u.metadata && u.metadata.team_name) || u.display_name || ''; });
+
+    const pidToSigla = {};
+    rosters.forEach(r => {
+      const sigla = franchiseSiglaForTeamName(teamNameByOwner[r.owner_id]);
+      if (!sigla || !Array.isArray(r.players)) return;
+      r.players.forEach(pid => { pidToSigla[pid] = sigla; });
+    });
+
+    const changes = [];
+    players.forEach(p => {
+      const rec = sleeperIdFor(p.name);
+      if (!rec || !rec.id) return;
+      const newSigla = pidToSigla[rec.id];
+      if (newSigla && newSigla !== p.team) {
+        changes.push({
+          time: new Date().toLocaleString('pt-BR', {day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}),
+          by: 'Sleeper', player: p.name, from: p.team, to: newSigla
+        });
+        p.team = newSigla;
+      }
+    });
+
+    if (changes.length) {
+      await savePlayers();
+      tradeLog = [...changes.reverse(), ...tradeLog];
+      await saveTradeLog();
+      showToast(`Sleeper sync — ${changes.length} jogador(es) atualizado(s) por trade`);
+      render();
+    }
+
+    sleeperLeagueSyncedAt = new Date();
+    setSyncBadge(`🔄 Sleeper · ${sleeperLeagueSyncedAt.toLocaleTimeString('pt-BR', {hour:'2-digit', minute:'2-digit'})}`, false);
+  } catch (e) {
+    console.warn('Sleeper league sync failed', e);
+    setSyncBadge('🔄 Sleeper (falhou, clique p/ tentar de novo)', false);
+  } finally {
+    sleeperLeagueSyncing = false;
+  }
 }
 
 function initials(name) {
@@ -957,13 +1052,16 @@ async function boot() {
   render();
 
   // fetch logos/headshots from Sleeper in the background, then re-render when ready
-  loadSleeperIndex().then(() => render());
+  loadSleeperIndex().then(() => { render(); syncSleeperLeague(); });
 
   document.querySelectorAll('.nav-tab').forEach(t => {
     t.addEventListener('click', () => { view = t.dataset.view; syncTabs(); render(); window.scrollTo(0,0); });
   });
   const gmInput = document.getElementById('gmNameInput');
   gmInput.addEventListener('change', () => saveMyName(gmInput.value.trim()));
+
+  const syncBadge = document.getElementById('sleeperSyncBadge');
+  if (syncBadge) syncBadge.addEventListener('click', () => syncSleeperLeague());
 }
 boot();
 
