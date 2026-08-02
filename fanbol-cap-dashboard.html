@@ -219,7 +219,17 @@
   .roster-table thead th.num{text-align:right;}
   .roster-table tbody td{padding:9px 14px; border-bottom:1px solid var(--line); font-size:13.5px;}
   .roster-table tbody tr:last-child td{border-bottom:none;}
-  .roster-table tbody tr:hover{background:var(--panel-2);}
+  .roster-table tbody tr:hover:not(.ir-row):not(.tx-row){background:var(--panel-2);}
+  .roster-table tbody tr.ir-row{background:rgba(217,80,60,0.10);}
+  .roster-table tbody tr.ir-row:hover{background:rgba(217,80,60,0.17);}
+  .roster-table tbody tr.tx-row{background:rgba(46,158,107,0.10);}
+  .roster-table tbody tr.tx-row:hover{background:rgba(46,158,107,0.17);}
+  .status-tag{
+    display:inline-block; font-family:var(--mono); font-weight:600; font-size:9.5px; letter-spacing:0.8px;
+    color:#fff; border-radius:4px; padding:2px 6px; margin-left:8px; vertical-align:middle;
+  }
+  .status-tag.ir{background:var(--danger);}
+  .status-tag.tx{background:var(--turf);}
   .pos-chip{
     font-family:var(--mono); font-weight:600; font-size:10.5px; padding:2px 7px; border-radius:5px;
     background:#1a222b; color:var(--gold); letter-spacing:0.5px;
@@ -563,13 +573,17 @@ async function syncSleeperLeague() {
     users.forEach(u => { teamNameByOwner[u.user_id] = (u.metadata && u.metadata.team_name) || u.display_name || ''; });
 
     const pidToSigla = {};
+    const pidToStatus = {}; // 'IR' (reserve) or 'TX' (taxi squad), per Sleeper roster
     rosters.forEach(r => {
       const sigla = franchiseSiglaForTeamName(teamNameByOwner[r.owner_id]);
       if (!sigla || !Array.isArray(r.players)) return;
       r.players.forEach(pid => { pidToSigla[pid] = sigla; });
+      (r.reserve || []).forEach(pid => { pidToStatus[pid] = 'IR'; });
+      (r.taxi || []).forEach(pid => { pidToStatus[pid] = 'TX'; });
     });
 
     const changes = [];
+    let statusChanges = 0;
     players.forEach(p => {
       const rec = sleeperMatchFor(p);
       if (!rec || !rec.id) return;
@@ -581,13 +595,23 @@ async function syncSleeperLeague() {
         });
         p.team = newSigla;
       }
+      const newStatus = pidToStatus[rec.id] || null;
+      if (newStatus !== (p.status || null)) {
+        p.status = newStatus;
+        statusChanges++;
+      }
     });
 
-    if (changes.length) {
+    if (changes.length || statusChanges) {
       await savePlayers();
-      tradeLog = [...changes.reverse(), ...tradeLog];
-      await saveTradeLog();
-      showToast(`Sleeper sync — ${changes.length} jogador(es) atualizado(s) por trade`);
+      if (changes.length) {
+        tradeLog = [...changes.reverse(), ...tradeLog];
+        await saveTradeLog();
+      }
+      const parts = [];
+      if (changes.length) parts.push(`${changes.length} jogador(es) mudaram de time`);
+      if (statusChanges) parts.push(`${statusChanges} atualização(ões) de IR/TX`);
+      showToast(`Sleeper sync — ${parts.join(' · ')}`);
       render();
     }
 
@@ -806,7 +830,9 @@ function renderTeam(sig) {
   const meta = TEAMS_META[sig];
   const hitByYear = teamCapByYear(sig);
   const spaceByYear = teamCapSpaceByYear(sig);
-  const roster = teamPlayers(sig).sort((a,b) => (a.order||99) - (b.order||99) || a.pos.localeCompare(b.pos));
+  const benchRank = (p) => p.status === 'IR' ? 1 : p.status === 'TX' ? 2 : 0;
+  const roster = teamPlayers(sig).sort((a,b) =>
+    benchRank(a) - benchRank(b) || (a.order||99) - (b.order||99) || a.pos.localeCompare(b.pos));
 
   const yearsHtml = meta.years.map((yr,i) => {
     const cap = Number(meta.salary_cap[i])||0;
@@ -822,9 +848,9 @@ function renderTeam(sig) {
   }).join('');
 
   const rows = roster.map(p => `
-    <tr>
+    <tr class="${p.status === 'IR' ? 'ir-row' : p.status === 'TX' ? 'tx-row' : ''}">
       <td><span class="pos-chip">${p.pos||'—'}</span></td>
-      <td class="playername"><div class="player-cell">${playerAvatarHtml(p, 28)}<span>${p.name}</span></div></td>
+      <td class="playername"><div class="player-cell">${playerAvatarHtml(p, 28)}<span>${p.name}</span>${p.status === 'IR' ? '<span class="status-tag ir">IR</span>' : p.status === 'TX' ? '<span class="status-tag tx">TX</span>' : ''}</div></td>
       <td><span class="nfl-tag">${p.nfl_team||'FA'}</span></td>
       <td class="num">${fmt(p.s2026)}</td>
       <td class="num">${p.s2027 ? fmt(p.s2027) : '—'}</td>
