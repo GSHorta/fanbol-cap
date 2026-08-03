@@ -178,6 +178,19 @@
     color:#fff; background:var(--danger); border-radius:4px; padding:2px 6px; margin-left:8px;
     vertical-align:middle;
   }
+  .min-badge{
+    display:inline-block; font-family:var(--mono); font-weight:600; font-size:9.5px; letter-spacing:0.8px;
+    color:#1a140a; background:var(--gold); border-radius:4px; padding:2px 6px; margin-left:8px;
+    vertical-align:middle;
+  }
+  .starter-badge{
+    display:inline-flex; align-items:center; justify-content:center;
+    min-width:22px; height:20px; padding:0 6px;
+    border-radius:6px; font-family:var(--mono); font-weight:700; font-size:12px;
+    vertical-align:middle;
+  }
+  .starter-badge.ok{background:var(--turf-dim); color:var(--turf);}
+  .starter-badge.warn{background:var(--danger-dim); color:var(--gold);}
   .team-row:last-child{border-bottom:none;}
   .team-row:hover{background:var(--panel-2);}
   .team-sigla{
@@ -253,6 +266,12 @@
   .roster-table tbody tr.ir-row:hover{background:rgba(217,80,60,0.17);}
   .roster-table tbody tr.tx-row{background:rgba(46,158,107,0.10);}
   .roster-table tbody tr.tx-row:hover{background:rgba(46,158,107,0.17);}
+  .roster-table tbody tr.group-row td{
+    background:var(--panel-2); font-family:var(--display); font-weight:700; font-size:12px;
+    letter-spacing:1px; text-transform:uppercase; color:var(--text); padding:9px 14px;
+  }
+  .roster-table tbody tr.group-row:hover{background:var(--panel-2);}
+  .group-count{font-family:var(--mono); font-weight:400; text-transform:none; letter-spacing:0; color:var(--muted-2);}
   .status-tag{
     display:inline-block; font-family:var(--mono); font-weight:600; font-size:9.5px; letter-spacing:0.8px;
     color:#fff; border-radius:4px; padding:2px 6px; margin-left:8px; vertical-align:middle;
@@ -519,13 +538,18 @@ function normalizeName(s) {
 // players who share a name (e.g. two NFL "Byron Murphy"s) by position.
 let sleeperByNamePos = {};
 
+// sleeper player_id -> real NFL team abbreviation, used to check whether a
+// starter actually plays for the NFL franchise the fantasy team represents.
+let sleeperTeamById = {};
+
 async function loadSleeperIndex() {
   try {
-    const cached = await kvGet('fanbol-sleeper-idx-v4', true);
+    const cached = await kvGet('fanbol-sleeper-idx-v5', true);
     if (cached && cached.value) {
       const parsed = JSON.parse(cached.value);
       sleeperIndex = parsed.idx;
       sleeperByNamePos = parsed.byNamePos;
+      sleeperTeamById = parsed.teamById || {};
       sleeperReady = true;
       return;
     }
@@ -536,6 +560,7 @@ async function loadSleeperIndex() {
     const data = await res.json();
     const idx = {};
     const byNamePos = {};
+    const teamById = {};
     for (const pid in data) {
       const p = data[pid];
       if (!p || (!p.first_name && !p.last_name)) continue;
@@ -544,11 +569,13 @@ async function loadSleeperIndex() {
       if (!norm) continue;
       if (!idx[norm]) idx[norm] = { id: pid, espn_id: p.espn_id || null };
       (byNamePos[norm] = byNamePos[norm] || []).push({ id: pid, positions: p.fantasy_positions || (p.position ? [p.position] : []) });
+      teamById[pid] = p.team || null;
     }
     sleeperIndex = idx;
     sleeperByNamePos = byNamePos;
+    sleeperTeamById = teamById;
     sleeperReady = true;
-    try { await kvSet('fanbol-sleeper-idx-v4', JSON.stringify({ idx, byNamePos }), true); } catch (e) {}
+    try { await kvSet('fanbol-sleeper-idx-v5', JSON.stringify({ idx, byNamePos, teamById }), true); } catch (e) {}
   } catch (e) {
     console.warn('Sleeper player index unavailable, using fallback avatars', e);
   }
@@ -574,6 +601,12 @@ function sleeperMatchFor(p) {
 // ---------------- Sleeper league sync (auto-detect trades) ----------------
 let sleeperLeagueSyncedAt = null;
 let sleeperLeagueSyncing = false;
+
+// Regra da liga: cada franquia precisa de pelo menos MIN_STARTERS jogadores na
+// escalação TITULAR (starters) do Sleeper — não confundir com o roster inteiro.
+// Só é conhecido depois do primeiro sync bem-sucedido (undefined até lá).
+const MIN_STARTERS = 7;
+let starterCounts = {};
 
 // Sleeper team_name comes with free-form suffixes ("Buffalo Bills - 8F"),
 // so match by prefix against the canonical franchise name instead of exact equality.
@@ -614,19 +647,31 @@ async function syncSleeperLeague() {
 
     const pidToSigla = {};
     const pidToStatus = {}; // 'IR' (reserve) or 'TX' (taxi squad), per Sleeper roster
+    const starterPids = new Set(); // player_ids currently in a starting-lineup slot, any team
+    const newStarterCounts = {};
     rosters.forEach(r => {
       const sigla = franchiseSiglaForTeamName(teamNameByOwner[r.owner_id]);
-      if (!sigla || !Array.isArray(r.players)) return;
+      if (!sigla) return;
+      // Sleeper fills empty starting slots with the placeholder id "0" — don't count those.
+      const validStarters = (r.starters || []).filter(pid => pid && pid !== '0');
+      validStarters.forEach(pid => starterPids.add(pid));
+      // Regra da liga: só conta como titular "da franquia" quem realmente joga
+      // pelo time da NFL correspondente (ex: um titular do Buffalo Bills que
+      // joga de verdade pelo Buffalo Bills na NFL) — não basta estar na escalação.
+      const homeStarters = validStarters.filter(pid => sleeperTeamById[pid] === sigla).length;
+      newStarterCounts[sigla] = { home: homeStarters, total: (r.starters || []).length };
+      if (!Array.isArray(r.players)) return;
       r.players.forEach(pid => { pidToSigla[pid] = sigla; });
       (r.reserve || []).forEach(pid => { pidToStatus[pid] = 'IR'; });
       (r.taxi || []).forEach(pid => { pidToStatus[pid] = 'TX'; });
     });
+    starterCounts = newStarterCounts;
 
     const changes = [];
     let statusChanges = 0;
     players.forEach(p => {
       const rec = sleeperMatchFor(p);
-      if (!rec || !rec.id) return;
+      if (!rec || !rec.id) { p.starter = false; return; }
       const newSigla = pidToSigla[rec.id];
       if (newSigla && newSigla !== p.team) {
         changes.push({
@@ -640,6 +685,7 @@ async function syncSleeperLeague() {
         p.status = newStatus;
         statusChanges++;
       }
+      p.starter = starterPids.has(rec.id);
     });
 
     if (changes.length || statusChanges) {
@@ -652,8 +698,8 @@ async function syncSleeperLeague() {
       if (changes.length) parts.push(`${changes.length} jogador(es) mudaram de time`);
       if (statusChanges) parts.push(`${statusChanges} atualização(ões) de IR/TX`);
       showToast(`Sleeper sync — ${parts.join(' · ')}`);
-      render();
     }
+    render(); // re-render always: starterCounts just came in fresh even if nothing else changed
 
     sleeperLeagueSyncedAt = new Date();
     setSyncBadge(`🔄 Sleeper · ${sleeperLeagueSyncedAt.toLocaleTimeString('pt-BR', {hour:'2-digit', minute:'2-digit'})}`, false);
@@ -867,6 +913,13 @@ function renderLeague() {
   `;
 }
 
+function starterBadgeHtml(sig) {
+  const s = starterCounts[sig];
+  if (!s) return '';
+  const belowMin = s.home < MIN_STARTERS;
+  return `<span class="starter-badge ${belowMin?'warn':'ok'}" title="Titulares que jogam pelo próprio time da NFL — mínimo da liga: ${MIN_STARTERS}">(${s.home}/${s.total})</span>`;
+}
+
 function teamRowHtml(sig) {
   const meta = TEAMS_META[sig];
   const hit = teamCapByYear(sig)[0];
@@ -877,7 +930,7 @@ function teamRowHtml(sig) {
     <div class="team-row ${over?'over-cap':''}" data-team="${sig}">
       ${teamLogoHtml(sig, 36)}
       <div class="team-name-cell">
-        <div class="fname">${meta.franquia} ${over?'<span class="over-badge">CAP ESTOURADO</span>':''}</div>
+        <div class="fname">${meta.franquia} ${starterBadgeHtml(sig)} ${over?'<span class="over-badge">CAP ESTOURADO</span>':''}</div>
         <div class="gm">GM ${meta.gm || '—'}</div>
       </div>
       <div class="cap-hit-cell">${fmtShort(hit)}</div>
@@ -910,7 +963,17 @@ function renderTeam(sig) {
       </div>`;
   }).join('');
 
-  const rows = roster.map(p => `
+  const starterInfo = starterCounts[sig];
+  const starterKnown = !!starterInfo;
+  const belowMin = starterKnown && starterInfo.home < MIN_STARTERS;
+
+  const sortSecondary = (a,b) => (a.order||99) - (b.order||99) || a.pos.localeCompare(b.pos);
+  const irList = roster.filter(p => p.status === 'IR').sort(sortSecondary);
+  const txList = roster.filter(p => p.status === 'TX').sort(sortSecondary);
+  const starterList = roster.filter(p => p.status !== 'IR' && p.status !== 'TX' && p.starter).sort(sortSecondary);
+  const benchList = roster.filter(p => p.status !== 'IR' && p.status !== 'TX' && !p.starter).sort(sortSecondary);
+
+  const playerRowHtml = (p) => `
     <tr class="${p.status === 'IR' ? 'ir-row' : p.status === 'TX' ? 'tx-row' : ''}">
       <td><span class="pos-chip">${p.pos||'—'}</span></td>
       <td class="playername"><div class="player-cell">${playerAvatarHtml(p, 28)}<span>${p.name}</span>${p.status === 'IR' ? '<span class="status-tag ir">IR</span>' : p.status === 'TX' ? '<span class="status-tag tx">TX</span>' : ''}</div></td>
@@ -921,20 +984,31 @@ function renderTeam(sig) {
       <td class="num">${p.s2029 ? fmt(p.s2029) : '—'}</td>
       <td class="num">${p.dead_cap ? fmt(p.dead_cap) : '—'}</td>
     </tr>
-  `).join('');
+  `;
+  const groupRowHtml = (label, list) => !list.length ? '' :
+    `<tr class="group-row"><td colspan="8">${label} <span class="group-count">(${list.length})</span></td></tr>` +
+    list.map(playerRowHtml).join('');
+
+  const rows = [
+    groupRowHtml('Titulares', starterList),
+    groupRowHtml('Reservas', benchList),
+    groupRowHtml('Calouros', txList),
+    groupRowHtml('Lesionados', irList),
+  ].join('');
 
   return `
     <div class="back-link" data-back="league">← Voltar para a liga</div>
     <div class="team-header ${spaceByYear[0]<0?'over-cap':''}">
       ${teamLogoHtml(sig, 68)}
       <div class="meta">
-        <div class="fname">${meta.franquia} ${spaceByYear[0]<0?'<span class="over-badge">CAP ESTOURADO</span>':''}</div>
+        <div class="fname">${meta.franquia} ${starterBadgeHtml(sig)} ${spaceByYear[0]<0?'<span class="over-badge">CAP ESTOURADO</span>':''}</div>
         <div class="gmline">GM ${meta.gm || '—'} · ${meta.conf_div || ''}</div>
       </div>
       <div class="stats">
         <div class="stat"><div class="label">Cap Hit 2026</div><div class="val">${fmtShort(hitByYear[0])}</div></div>
         <div class="stat"><div class="label">Espaço 2026</div><div class="val" style="color:${spaceByYear[0]>=0?'var(--turf)':'var(--danger)'}">${fmtShort(spaceByYear[0])}</div></div>
         <div class="stat"><div class="label">Jogadores</div><div class="val">${roster.length}</div></div>
+        <div class="stat"><div class="label">Titulares da Franquia</div><div class="val" style="color:${!starterKnown?'var(--muted-2)':belowMin?'var(--gold)':'var(--turf)'}">${starterKnown ? `${starterInfo.home} / ${starterInfo.total}` : '—'}</div></div>
       </div>
     </div>
 
