@@ -178,11 +178,6 @@
     color:#fff; background:var(--danger); border-radius:4px; padding:2px 6px; margin-left:8px;
     vertical-align:middle;
   }
-  .min-badge{
-    display:inline-block; font-family:var(--mono); font-weight:600; font-size:9.5px; letter-spacing:0.8px;
-    color:#1a140a; background:var(--gold); border-radius:4px; padding:2px 6px; margin-left:8px;
-    vertical-align:middle;
-  }
   .starter-badge{
     display:inline-flex; align-items:center; justify-content:center;
     min-width:22px; height:20px; padding:0 6px;
@@ -211,6 +206,8 @@
   .avatar-img{ position:absolute; inset:0; width:100%; height:100%; object-fit:cover; object-position:top center; }
   .player-cell{ display:flex; align-items:center; gap:10px; }
   .team-name-cell .fname{font-family:var(--display); font-weight:600; font-size:15px;}
+  .team-name-cell .team-badges{display:flex; align-items:center; flex-wrap:wrap; gap:5px; min-height:20px; margin:3px 0;}
+  .team-name-cell .team-badges .over-badge{margin-left:0;}
   .team-name-cell .gm{font-family:var(--mono); font-size:10.5px; color:var(--muted-2);}
   .cap-hit-cell{font-family:var(--mono); font-size:13px; text-align:right; color:var(--muted);}
   .cap-space-cell{font-family:var(--mono); font-size:13px; text-align:right; font-weight:600;}
@@ -930,7 +927,8 @@ function teamRowHtml(sig) {
     <div class="team-row ${over?'over-cap':''}" data-team="${sig}">
       ${teamLogoHtml(sig, 36)}
       <div class="team-name-cell">
-        <div class="fname">${meta.franquia} ${starterBadgeHtml(sig)} ${over?'<span class="over-badge">CAP ESTOURADO</span>':''}</div>
+        <div class="fname">${meta.franquia}</div>
+        <div class="team-badges">${starterBadgeHtml(sig)}${over?'<span class="over-badge">CAP ESTOURADO</span>':''}</div>
         <div class="gm">GM ${meta.gm || '—'}</div>
       </div>
       <div class="cap-hit-cell">${fmtShort(hit)}</div>
