@@ -1300,6 +1300,13 @@ async function boot() {
     const wrap = document.getElementById('playerSearchWrap');
     if (wrap && !wrap.contains(e.target) && playerSearchResults) playerSearchResults.classList.remove('show');
   });
+
+  // Mantém tudo espelhado da Sleeper (times, IR/TX, titulares) mesmo com a aba
+  // aberta por um tempo, sem precisar recarregar — só reconsulta se a aba
+  // estiver visível, pra não gastar chamada de API à toa em background.
+  setInterval(() => {
+    if (document.visibilityState === 'visible') syncSleeperLeague();
+  }, 3 * 60 * 1000);
 }
 boot();
 
